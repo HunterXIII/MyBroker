@@ -89,11 +89,11 @@ type Subscriber struct {
 }
 
 func (s *Subscriber) StartWorker(ctx context.Context) {
-
+	s.Log.Info("Start Sub's worker")
 	go func() {
 		defer func() {
 			// TODO
-			s.Log.Info("Worker stopped for client", "id", s.ID)
+			s.Log.Info("Stop Sub's worker")
 		}()
 
 		for {
@@ -107,7 +107,7 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 
 				err := s.Client.WritePacket(pk)
 				if err != nil {
-					s.Log.Error("Failed to send packet", "client", s.ID, "err", err)
+					s.Log.Error("Failed to send message", "ClientID", s.ID, "err", err)
 					return
 				}
 			case <-ctx.Done():
@@ -117,11 +117,12 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 	}()
 }
 
+// TODD: Change Qos with 1 for at least once
 func (s *Subscriber) buildPacket(msg *Message) packets.Packet {
 	return packets.Packet{
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Publish,
-			Qos:  1,
+			Qos:  0,
 		},
 		TopicName: msg.Topic,
 		Payload:   msg.Payload,

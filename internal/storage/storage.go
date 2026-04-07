@@ -17,7 +17,7 @@ type StorageService struct {
 	msgFile    *os.File
 	offsetFile *os.File
 	mu         sync.RWMutex
-	logger     *slog.Logger
+	Log        *slog.Logger
 }
 
 func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error) {
@@ -39,15 +39,15 @@ func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error)
 	}
 
 	return &StorageService{
-		logger:     logger,
+		Log:        logger,
 		msgFile:    msgFile,
 		offsetFile: offsetFile,
 	}, nil
 }
 
 func (s *StorageService) SaveMessage(msg *models.Message) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	msgStr := fmt.Sprintf("%d|%s|%s|%s\n", msg.Timestamp, msg.ID, msg.Topic, msg.Payload)
 
@@ -57,23 +57,25 @@ func (s *StorageService) SaveMessage(msg *models.Message) error {
 	}
 
 	s.msgFile.Sync()
+	s.Log.Debug("Sync log file")
 
 	size, err := s.GetCurrentFileSize()
 	if err != nil {
 		return err
 	}
-
+	s.Log.Debug("Changed log file", "size", size)
 	return s.SaveOffset(size)
 }
 
 func (s *StorageService) GetCurrentFileSize() (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	info, err := s.msgFile.Stat()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get file stat: %w", err)
 	}
+	s.Log.Debug("Get info of the log file", "info", info)
 
 	return info.Size(), nil
 }
@@ -140,15 +142,18 @@ func (s *StorageService) LoadUnprocessed() ([]*models.Message, error) {
 
 		msg, err := s.parseLogLine(line)
 		if err != nil {
-			s.logger.Error("failed to parse log line", "line", line, "err", err)
+			s.Log.Error("failed to parse log line", "line", line, "err", err)
 			continue
 		}
 		messages = append(messages, msg)
+		s.Log.Debug("Recovered a new message", "MsgID", msg.ID, "Topic", msg.Topic, "service", "StorageService")
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scanner error: %w", err)
 	}
+
+	s.Log.Info("Unprocessed messages found", "Count", len(messages), "service", "StorageService")
 
 	return messages, nil
 }

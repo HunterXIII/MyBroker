@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"fmt"
 	"log/slog"
 
 	"github.com/HunterXIII/MyBroker/internal/broker"
@@ -44,6 +45,8 @@ func (h *BrokerHook) OnSubscribe(cl *mqtt.Client, pk packets.Packet) packets.Pac
 		h.Broker.Subscribe(cl.ID, filter.Filter)
 	}
 
+	pk.Filters = []packets.Subscription{}
+
 	return pk
 }
 
@@ -66,11 +69,12 @@ func (h *BrokerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 
 func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
 	if pk.FixedHeader.Type == packets.Publish {
-		h.Log.Info("[PUBLISH]", "ClientID", cl.ID, "Topic", pk.TopicName, "Payload", pk.Payload)
+		h.Log.Info("[PUBLISH]", "ClientID", cl.ID, "Topic", pk.TopicName, "Payload", fmt.Sprintf("%s", pk.Payload))
 		err := h.Broker.NewMessage(pk.TopicName, pk.Payload)
 		if err != nil {
 			h.Log.Error("Don't push new message", "err", err)
 		}
+
 	}
 	return pk, nil
 }
