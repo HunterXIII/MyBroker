@@ -1,9 +1,13 @@
 package models
 
 import (
+	"context"
 	"fmt"
-	"net"
+	"log/slog"
 	"sync"
+
+	mqtt "github.com/mochi-mqtt/server/v2"
+	"github.com/mochi-mqtt/server/v2/packets"
 )
 
 type Message struct {
@@ -42,7 +46,7 @@ func (q *Queue) AddMessage(msg *Message) error {
 type Topic struct {
 	Name        string
 	Queue       *Queue
-	Subscribers map[string]*Subscriber
+	Subscribers []*Subscriber
 }
 
 func NewTopic(name string, maxQueueSize int) *Topic {
@@ -52,7 +56,7 @@ func NewTopic(name string, maxQueueSize int) *Topic {
 			Messages: []Message{},
 			MaxSize:  maxQueueSize,
 		},
-		Subscribers: make(map[string]*Subscriber),
+		Subscribers: []*Subscriber{},
 	}
 }
 
@@ -60,8 +64,66 @@ func (t *Topic) Push(msg *Message) error {
 	return t.Queue.AddMessage(msg)
 }
 
+func (t *Topic) AddSubscriber(sub *Subscriber) error {
+	t.Subscribers = append(t.Subscribers, sub)
+	return nil
+}
+
+// TODO: Sub must be contein filed of topics
+func (t *Topic) RemoveSubsciber(id string) bool {
+	for idx, sub := range t.Subscribers {
+		if sub.ID == id {
+			t.Subscribers = append(t.Subscribers[:idx], t.Subscribers[idx+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
 type Subscriber struct {
-	ID         string
-	Connection net.Conn
-	Topics     map[string]*Topic
+	ID       string
+	Client   *mqtt.Client
+	Messages chan *Message
+	Done     chan struct{}
+	Log      *slog.Logger
+}
+
+func (s *Subscriber) StartWorker(ctx context.Context) {
+
+	go func() {
+		defer func() {
+			// TODO
+			s.Log.Info("Worker stopped for client", "id", s.ID)
+		}()
+
+		for {
+			select {
+			case msg, ok := <-s.Messages:
+				if !ok {
+					return
+				}
+
+				pk := s.buildPacket(msg)
+
+				err := s.Client.WritePacket(pk)
+				if err != nil {
+					s.Log.Error("Failed to send packet", "client", s.ID, "err", err)
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+func (s *Subscriber) buildPacket(msg *Message) packets.Packet {
+	return packets.Packet{
+		FixedHeader: packets.FixedHeader{
+			Type: packets.Publish,
+			Qos:  1,
+		},
+		TopicName: msg.Topic,
+		Payload:   msg.Payload,
+	}
 }
