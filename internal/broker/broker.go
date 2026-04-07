@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/HunterXIII/MyBroker/internal/models"
+	"github.com/HunterXIII/MyBroker/internal/storage"
 	"github.com/google/uuid"
 )
 
@@ -15,16 +16,18 @@ type BrokerConfig struct {
 }
 
 type BrokerService struct {
-	Topics map[string]*models.Topic
-	Mu     sync.RWMutex
-	Log    *slog.Logger
-	Config BrokerConfig
+	Topics  map[string]*models.Topic
+	Storage *storage.StorageService
+	Mu      sync.RWMutex
+	Log     *slog.Logger
+	Config  BrokerConfig
 }
 
-func NewBrokerService(log *slog.Logger, cfg BrokerConfig) *BrokerService {
+func NewBrokerService(storage *storage.StorageService, log *slog.Logger, cfg BrokerConfig) *BrokerService {
 	return &BrokerService{
-		Log:    log,
-		Config: cfg,
+		Storage: storage,
+		Log:     log,
+		Config:  cfg,
 	}
 }
 
@@ -56,5 +59,28 @@ func (b *BrokerService) NewMessage(topicName string, payload []byte) error {
 	if err != nil {
 		b.Log.Error("The message wasn't added to the queue", "error", err)
 	}
+
 	return err
+}
+
+func (b *BrokerService) RecoveryMessage() error {
+	messages, err := b.Storage.LoadUnprocessed()
+	if err != nil {
+		return err
+	}
+
+	if len(messages) == 0 {
+		return nil
+	}
+
+	for _, msg := range messages {
+		topic := b.GetOrCreateNewTopic(msg.Topic)
+		if err := topic.Push(msg); err != nil {
+			b.Log.Error("Recovery: failed to push msg", "id", msg.ID, "err", err)
+			continue
+		}
+	}
+
+	size, _ := b.Storage.GetCurrentFileSize()
+	return b.Storage.SaveOffset(size)
 }
