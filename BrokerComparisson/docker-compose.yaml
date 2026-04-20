@@ -1,0 +1,17 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq_bench
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_ERLANG_COOKIE=extreme_benchmarking_long_cookie_2026
+      - RABBITMQ_DISK_FREE_LIMIT=10MB  # Снижаем порог до минимума
+      - VM_MEMORY_HIGH_WATERMARK=0.8   # Разрешаем использовать до 80% RAM
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_bench
+    ports:
+      - "6379:6379"
