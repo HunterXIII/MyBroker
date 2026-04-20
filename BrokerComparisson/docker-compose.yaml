@@ -5,6 +5,11 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'    # Жесткий лимит: 1 ядро
+          memory: 1G     # Жесткий лимит: 1 ГБ RAM
     environment:
       - RABBITMQ_ERLANG_COOKIE=extreme_benchmarking_long_cookie_2026
       - RABBITMQ_DISK_FREE_LIMIT=10MB  # Снижаем порог до минимума
@@ -15,3 +20,8 @@ services:
     container_name: redis_bench
     ports:
       - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'    # Жесткий лимит: 1 ядро
+          memory: 1G     # Жесткий лимит: 1 ГБ RAM
