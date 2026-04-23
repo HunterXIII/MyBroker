@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
 type Message struct {
-	ID        string
 	Topic     string
 	Payload   []byte
-	Timestamp int64
+	ExpiresAt time.Time
 	TTL       int64
+	Offset    uint64
+	PacketID  uint16
 }
 
 type Queue struct {
@@ -85,7 +87,20 @@ type Subscriber struct {
 	Client   *mqtt.Client
 	Messages chan *Message
 	Done     chan struct{}
-	Log      *slog.Logger
+
+	nextPacketID uint16
+	InFlight     map[uint16]uint64
+	InFlightMu   sync.RWMutex
+
+	Log *slog.Logger
+}
+
+func (s *Subscriber) NextPacketID() uint16 {
+	s.InFlightMu.Lock()
+	defer s.InFlightMu.Unlock()
+
+	s.nextPacketID++
+	return s.nextPacketID
 }
 
 func (s *Subscriber) StartWorker(ctx context.Context) {
@@ -103,7 +118,12 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 					return
 				}
 
-				pk := s.buildPacket(msg)
+				packetID := s.NextPacketID()
+				s.InFlightMu.Lock()
+				s.InFlight[packetID] = msg.Offset
+				s.InFlightMu.Unlock()
+
+				pk := s.buildPacket(packetID, msg)
 
 				err := s.Client.WritePacket(pk)
 				if err != nil {
@@ -118,13 +138,14 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 }
 
 // TODD: Change Qos with 1 for at least once
-func (s *Subscriber) buildPacket(msg *Message) packets.Packet {
+func (s *Subscriber) buildPacket(packetID uint16, msg *Message) packets.Packet {
 	return packets.Packet{
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Publish,
-			Qos:  0,
+			Qos:  1,
 		},
 		TopicName: msg.Topic,
 		Payload:   msg.Payload,
+		PacketID:  packetID,
 	}
 }

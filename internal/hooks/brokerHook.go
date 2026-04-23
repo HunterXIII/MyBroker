@@ -68,13 +68,34 @@ func (h *BrokerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 }
 
 func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
-	if pk.FixedHeader.Type == packets.Publish {
+
+	switch pk.FixedHeader.Type {
+	case packets.Publish:
 		h.Log.Info("[PUBLISH]", "ClientID", cl.ID, "Topic", pk.TopicName, "Payload", fmt.Sprintf("%s", pk.Payload))
 		err := h.Broker.NewMessage(pk.TopicName, pk.Payload)
 		if err != nil {
 			h.Log.Error("Don't push new message", "err", err)
 		}
+	case packets.Puback:
+		h.Log.Info("[PUBACK]", "ClientID", cl.ID, "PacketID", pk.PacketID)
 
+		sub := h.Broker.GetSubscriber(cl.ID)
+		if sub == nil {
+			return pk, nil
+		}
+
+		sub.InFlightMu.Lock()
+		offset, exists := sub.InFlight[pk.PacketID]
+		if exists {
+			delete(sub.InFlight, pk.PacketID)
+		}
+		sub.InFlightMu.Unlock()
+
+		if exists {
+			h.Broker.Storage.MarkAsDelivered(cl.ID, offset)
+			h.Log.Debug("Offset updated after PUBACK", "ClientID", cl.ID, "Offset", offset)
+		}
 	}
+
 	return pk, nil
 }

@@ -2,69 +2,190 @@ package storage
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/HunterXIII/MyBroker/internal/models"
 )
 
 type StorageService struct {
 	msgFile    *os.File
-	offsetFile *os.File
-	mu         sync.RWMutex
-	Log        *slog.Logger
+	msgLogPath string
+	subsPath   string
+	offsetPath string
+
+	mu            sync.RWMutex
+	currentOffset uint64
+	offsets       map[string]uint64
+	subscriptions map[string][]string
+
+	Log *slog.Logger
 }
 
 func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error) {
-	msgPath := filepath.Join(dir, "messages.log")
-	offsetPath := filepath.Join(dir, "processed.idx")
-
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
 
-	msgFile, err := os.OpenFile(msgPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	s := &StorageService{
+		Log:           logger,
+		msgLogPath:    filepath.Join(dir, "messages.json"),
+		subsPath:      filepath.Join(dir, "subscriptions.json"),
+		offsetPath:    filepath.Join(dir, "offsets.json"),
+		offsets:       make(map[string]uint64),
+		subscriptions: make(map[string][]string),
+	}
+
+	var err error
+	s.msgFile, err = os.OpenFile(s.msgLogPath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, err
 	}
 
-	offsetFile, err := os.OpenFile(offsetPath, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
+	if err := s.loadState(); err != nil {
 		return nil, err
 	}
 
-	return &StorageService{
-		Log:        logger,
-		msgFile:    msgFile,
-		offsetFile: offsetFile,
-	}, nil
+	return s, nil
 }
 
-func (s *StorageService) SaveMessage(msg *models.Message) error {
+func (s *StorageService) loadState() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if data, err := os.ReadFile(s.subsPath); err == nil {
+		json.Unmarshal(data, &s.subscriptions)
+	}
+
+	if data, err := os.ReadFile(s.offsetPath); err == nil {
+		json.Unmarshal(data, &s.offsets)
+	}
+
+	s.currentOffset = s.getLastOffsetFromLog()
+
+	s.Log.Info("Storage state loaded",
+		"last_offset", s.currentOffset,
+		"active_sessions", len(s.offsets))
+
+	return nil
+}
+
+func (s *StorageService) getLastOffsetFromLog() uint64 {
+	file, err := os.Open(s.msgLogPath)
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+
+	var lastOffset uint64
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		var msg models.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
+			lastOffset = msg.Offset
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		s.Log.Error("Error scanning log file", "err", err)
+		return 0
+	}
+
+	go s.startCheckpointWorker()
+
+	return lastOffset
+}
+
+func (s *StorageService) startCheckpointWorker() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.flushOffsetsToDisk()
+	}
+}
+
+func (s *StorageService) flushOffsetsToDisk() {
+	s.mu.RLock()
+	data, err := json.MarshalIndent(s.offsets, "", "  ")
+	s.mu.RUnlock()
+
+	if err != nil {
+		s.Log.Error("Failed to marshal offsets for checkpoint", "err", err)
+		return
+	}
+
+	tmpPath := s.offsetPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		s.Log.Error("Failed to write offsets checkpoint", "err", err)
+		return
+	}
+
+	if err := os.Rename(tmpPath, s.offsetPath); err != nil {
+		s.Log.Error("Failed to commit offsets checkpoint", "err", err)
+	}
+}
+
+func (s *StorageService) GetMessagesSince(offset uint64) ([]models.Message, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	msgStr := fmt.Sprintf("%d|%s|%s|%s\n", msg.Timestamp, msg.ID, msg.Topic, msg.Payload)
-
-	_, err := s.msgFile.WriteString(msgStr)
+	file, err := os.Open(s.msgLogPath)
 	if err != nil {
-		return fmt.Errorf("failed to write message: %w", err)
+		return nil, err
+	}
+	defer file.Close()
+
+	var result []models.Message
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		var msg models.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
+			if msg.Offset > offset {
+				if time.Now().Before(msg.ExpiresAt) {
+					result = append(result, msg)
+				}
+			}
+		}
 	}
 
-	s.msgFile.Sync()
-	s.Log.Debug("Sync log file")
+	return result, nil
+}
 
-	size, err := s.GetCurrentFileSize()
+func (s *StorageService) SaveMessage(msg *models.Message) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.currentOffset++
+	msg.Offset = s.currentOffset
+
+	data, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("failed to marshal message: %w", err)
 	}
-	s.Log.Debug("Changed log file", "size", size)
-	return s.SaveOffset(size)
+
+	if _, err := s.msgFile.Write(data); err != nil {
+		return 0, fmt.Errorf("failed to write to log: %w", err)
+	}
+
+	if _, err := s.msgFile.WriteString("\n"); err != nil {
+		return 0, fmt.Errorf("failed to write newline: %w", err)
+	}
+
+	if err := s.msgFile.Sync(); err != nil {
+		s.Log.Error("Failed to sync log file", "err", err)
+	}
+
+	s.Log.Debug("Message saved", "offset", s.currentOffset, "topic", msg.Topic)
+
+	return s.currentOffset, nil
 }
 
 func (s *StorageService) GetCurrentFileSize() (int64, error) {
@@ -80,99 +201,70 @@ func (s *StorageService) GetCurrentFileSize() (int64, error) {
 	return info.Size(), nil
 }
 
-func (s *StorageService) SaveOffset(offset int64) error {
-
-	if err := s.offsetFile.Truncate(0); err != nil {
-		return err
-	}
-
-	_, err := s.offsetFile.WriteAt([]byte(fmt.Sprintf("%d", offset)), 0)
-	return err
-}
-
-func (s *StorageService) LoadOffset() (int64, error) {
-
-	_, err := s.offsetFile.Seek(0, 0)
-	if err != nil {
-		return 0, fmt.Errorf("failed to seek offset file: %w", err)
-	}
-
-	data := make([]byte, 32)
-
-	n, err := s.offsetFile.Read(data)
-	if err != nil {
-		if err.Error() == "EOF" {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("failed to read offset: %w", err)
-	}
-
-	cleanData := string(data[:n])
-
-	offset, err := strconv.ParseInt(cleanData, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse offset '%s': %w", cleanData, err)
-	}
-
-	return offset, nil
-}
-
-func (s *StorageService) LoadUnprocessed() ([]*models.Message, error) {
+func (s *StorageService) SaveSubscription(clientID, topic string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	offset, err := s.LoadOffset()
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = s.msgFile.Seek(offset, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	scanner := bufio.NewScanner(s.msgFile)
-	var messages []*models.Message
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
+	exists := false
+	for _, t := range s.subscriptions[clientID] {
+		if t == topic {
+			exists = true
+			break
 		}
-
-		msg, err := s.parseLogLine(line)
-		if err != nil {
-			s.Log.Error("failed to parse log line", "line", line, "err", err)
-			continue
-		}
-		messages = append(messages, msg)
-		s.Log.Debug("Recovered a new message", "MsgID", msg.ID, "Topic", msg.Topic, "service", "StorageService")
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanner error: %w", err)
+	if !exists {
+		s.subscriptions[clientID] = append(s.subscriptions[clientID], topic)
 	}
 
-	s.Log.Info("Unprocessed messages found", "Count", len(messages), "service", "StorageService")
+	data, err := json.MarshalIndent(s.subscriptions, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal subscriptions: %w", err)
+	}
 
-	return messages, nil
+	err = os.WriteFile(s.subsPath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to save subscriptions file: %w", err)
+	}
+
+	s.Log.Debug("Subscription saved to disk", "client", clientID, "topic", topic)
+	return nil
 }
 
-func (s *StorageService) parseLogLine(line string) (*models.Message, error) {
-	parts := strings.Split(line, "|")
-	if len(parts) < 4 {
-		return nil, fmt.Errorf("invalid log format: expected 4 parts, got %d", len(parts))
+func (s *StorageService) RemoveSubscription(clientID, topic string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for idx, t := range s.subscriptions[clientID] {
+		if t == topic {
+			s.subscriptions[clientID] = append(s.subscriptions[clientID][:idx], s.subscriptions[clientID][idx+1:]...)
+			return
+		}
 	}
 
-	ts, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return nil, err
+}
+
+func (s *StorageService) GetClientOffset(clientID string) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if offset, ok := s.offsets[clientID]; ok {
+		return offset
 	}
 
-	return &models.Message{
-		Timestamp: ts,
-		ID:        parts[1],
-		Topic:     parts[2],
-		Payload:   []byte(parts[3]),
-	}, nil
+	return s.currentOffset
+}
+
+func (s *StorageService) MarkAsDelivered(clientID string, offset uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.offsets[clientID]
+
+	if !exists || offset > current {
+		s.offsets[clientID] = offset
+		s.Log.Debug("Client progress updated in memory",
+			"ClientID", clientID,
+			"NewOffset", offset)
+	}
 }

@@ -2,15 +2,13 @@ package broker
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
-	"github.com/HunterXIII/MyBroker/delivery"
+	"github.com/HunterXIII/MyBroker/internal/delivery"
 	"github.com/HunterXIII/MyBroker/internal/models"
 	"github.com/HunterXIII/MyBroker/internal/storage"
-	"github.com/google/uuid"
 	mqtt "github.com/mochi-mqtt/server/v2"
 )
 
@@ -53,11 +51,6 @@ func (b *BrokerService) Start() error {
 
 	b.Delivery.Run(ctx)
 
-	b.Log.Info("Recovering unprocessed messages...")
-	if err := b.RecoveryMessage(); err != nil {
-		return fmt.Errorf("recovery failed: %w", err)
-	}
-
 	b.Log.Info("MQTT Server is listening on :1883")
 	return b.Server.Serve()
 }
@@ -71,6 +64,7 @@ func (b *BrokerService) AddSubscriber(cl *mqtt.Client) error {
 		Client:   cl,
 		Messages: make(chan *models.Message, 128), //HARD
 		Done:     make(chan struct{}, 1),
+		InFlight: make(map[uint16]uint64),
 		Log:      b.Log.With("SubID", cl.ID),
 	}
 	b.Subscribers = append(b.Subscribers, sub)
@@ -107,21 +101,35 @@ func (b *BrokerService) RemoveSubsciber(id string) error {
 }
 
 func (b *BrokerService) Subscribe(id string, topicName string) error {
+	if err := b.Storage.SaveSubscription(id, topicName); err != nil {
+		b.Log.Error("Failed to save subscription to disk", "err", err)
+		return err
+	}
+
 	sub := b.GetSubscriber(id)
 	topic := b.GetOrCreateNewTopic(topicName)
 	topic.AddSubscriber(sub)
-	b.Log.Info("Client subscribed to the topic", "ClientID", id, "topic", topicName, "service", "BrokerService")
 
-	recoveredMsg := b.Delivery.GetMessageFromOffQueue(topicName)
-	if len(recoveredMsg) == 0 {
-		return nil
+	b.Log.Info("Client subscribed", "ClientID", id, "topic", topicName)
+
+	lastOffset := b.Storage.GetClientOffset(id)
+
+	missedMsgs, err := b.Storage.GetMessagesSince(lastOffset)
+	if err != nil {
+		b.Log.Error("Failed to recover missed messages", "err", err)
+		return err
 	}
-	b.Log.Info("Unprocessed messages found", "Topic", topicName, "Count", len(recoveredMsg), "service", "BrokerService")
 
-	for _, msg := range recoveredMsg {
-		b.Delivery.Tasks <- &delivery.DeliveryTask{
-			Msg:  msg,
-			Subs: topic.Subscribers,
+	if len(missedMsgs) > 0 {
+		b.Log.Info("Recovering history", "ClientID", id, "Count", len(missedMsgs))
+
+		for _, msg := range missedMsgs {
+			if msg.Topic == topicName {
+				b.Delivery.Tasks <- &delivery.DeliveryTask{
+					Msg:  &msg,
+					Subs: []*models.Subscriber{sub},
+				}
+			}
 		}
 	}
 
@@ -129,6 +137,7 @@ func (b *BrokerService) Subscribe(id string, topicName string) error {
 }
 
 func (b *BrokerService) Unsubscribe(id string, topicName string) error {
+	b.Storage.RemoveSubscription(id, topicName)
 	sub := b.GetSubscriber(id)
 	topic := b.GetOrCreateNewTopic(topicName)
 	topic.RemoveSubsciber(sub.ID)
@@ -160,54 +169,31 @@ func (b *BrokerService) GetOrCreateNewTopic(name string) *models.Topic {
 }
 
 func (b *BrokerService) NewMessage(topicName string, payload []byte) error {
-	topic := b.GetOrCreateNewTopic(topicName)
 	msg := &models.Message{
-		ID:        uuid.NewString(),
 		Topic:     topicName,
 		Payload:   payload,
-		Timestamp: time.Now().Unix(),
+		ExpiresAt: time.Now().Add(time.Duration(b.Config.TTL) * time.Second),
 		TTL:       b.Config.TTL,
 	}
 
-	err := topic.Push(msg)
+	var err error
+	msg.Offset, err = b.Storage.SaveMessage(msg)
 	if err != nil {
-		b.Log.Error("The message wasn't added to the queue", "error", err)
+		b.Log.Error("The message wasn't logged, aborting delivery", "error", err)
+		return err
 	}
-	b.Log.Debug("Message added to the topic", "MsgID", msg.ID, "Topic", msg.Topic)
 
-	err = b.Storage.SaveMessage(msg)
-	if err != nil {
-		b.Log.Error("The message wasn't logged", "error", err)
-	}
-	b.Log.Debug("Message saved to the log file", "MsgID", msg.ID)
+	topic := b.GetOrCreateNewTopic(topicName)
+
+	_ = topic.Push(msg)
 
 	b.Delivery.Tasks <- &delivery.DeliveryTask{
 		Msg:  msg,
 		Subs: topic.Subscribers,
 	}
-	b.Log.Debug("Create a new delivery task", "MsgID", msg.ID)
 
-	return err
-}
-
-func (b *BrokerService) RecoveryMessage() error {
-	messages, err := b.Storage.LoadUnprocessed()
-	if err != nil {
-		return err
-	}
-
-	if len(messages) == 0 {
-		return nil
-	}
-
-	b.Delivery.OfflineQueue = messages
-
-	for _, msg := range messages {
-		_ = b.GetOrCreateNewTopic(msg.Topic)
-	}
-
-	size, _ := b.Storage.GetCurrentFileSize()
-	return b.Storage.SaveOffset(size)
+	b.Log.Debug("Message logged and task created", "Offset", msg.Offset, "Topic", msg.Topic)
+	return nil
 }
 
 func (b *BrokerService) Stop() {

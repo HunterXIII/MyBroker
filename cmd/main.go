@@ -6,9 +6,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/HunterXIII/MyBroker/delivery"
-	"github.com/HunterXIII/MyBroker/hooks"
 	"github.com/HunterXIII/MyBroker/internal/broker"
+	"github.com/HunterXIII/MyBroker/internal/delivery"
+	"github.com/HunterXIII/MyBroker/internal/hooks"
 	"github.com/HunterXIII/MyBroker/internal/storage"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
@@ -26,7 +26,7 @@ func main() {
 	}()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 
 	slog.SetDefault(logger)
