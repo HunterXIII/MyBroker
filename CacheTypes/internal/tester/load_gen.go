@@ -48,9 +48,9 @@ func RunTest(repo repository.Repository, m *metrics.Metrics, readRatio float64) 
 	}
 	wg.Wait()
 	fmt.Println(" Готово!")
-	total, hits, dbOps, avgLat := m.GetStats()
+	total, hits, dbReads, dbWrites, avgLat := m.GetStats()
 	rps := float64(total) / time.Since(start).Seconds()
 
-	fmt.Printf("Results: RPS: %.2f | Latency: %v | HitRate: %.2f%% | DB Ops: %d\n",
-		rps, avgLat, float64(hits)/float64(total)*100, dbOps)
+	fmt.Printf("Results: RPS: %.2f | Latency: %v | HitRate: %.2f%% | DB Reads: %d | DB Writes: %d\n",
+		rps, avgLat, float64(hits)/float64(total)*100, dbReads, dbWrites)
 }

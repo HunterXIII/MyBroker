@@ -31,10 +31,11 @@ func (m *Metrics) Reset() {
 	m.mu.Unlock()
 }
 
-func (m *Metrics) GetStats() (int64, int64, int64, time.Duration) {
+func (m *Metrics) GetStats() (int64, int64, int64, int64, time.Duration) {
 	total := atomic.LoadInt64(&m.TotalRequests)
 	hits := atomic.LoadInt64(&m.CacheHits)
-	dbOps := atomic.LoadInt64(&m.DBReads) + atomic.LoadInt64(&m.DBWrites)
+	dbReads := atomic.LoadInt64(&m.DBReads)
+	dbWrites := atomic.LoadInt64(&m.DBWrites)
 
 	var avgLat time.Duration
 	m.mu.Lock()
@@ -47,5 +48,5 @@ func (m *Metrics) GetStats() (int64, int64, int64, time.Duration) {
 	}
 	m.mu.Unlock()
 
-	return total, hits, dbOps, avgLat
+	return total, hits, dbReads, dbWrites, avgLat
 }
