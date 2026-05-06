@@ -77,7 +77,7 @@ func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.P
 			h.Log.Error("Don't push new message", "err", err)
 		}
 	case packets.Puback:
-		h.Log.Info("[PUBACK]", "ClientID", cl.ID, "PacketID", pk.PacketID)
+		h.Log.Info("[PUBACK]", "ClientID", cl.ID, "PacketID", pk.PacketID, "ReasonCode", pk.ReasonCode)
 
 		sub := h.Broker.GetSubscriber(cl.ID)
 		if sub == nil {
@@ -91,10 +91,26 @@ func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.P
 		}
 		sub.InFlightMu.Unlock()
 
-		if exists {
-			h.Broker.Storage.MarkAsDelivered(cl.ID, offset)
-			h.Log.Debug("Offset updated after PUBACK", "ClientID", cl.ID, "Offset", offset)
+		if !exists {
+			return pk, nil
 		}
+
+		if pk.ReasonCode >= 0x80 {
+			h.Log.Warn("Consumer failed to process message, moving to DLQ",
+				"ClientID", cl.ID, "Offset", offset)
+
+			err := h.Broker.Storage.MoveToDLQ(cl.ID, offset)
+			if err != nil {
+				h.Log.Error("Failed to move message to DLQ", "err", err)
+				return pk, nil
+			}
+
+			h.Broker.Storage.MarkAsDelivered(cl.ID, offset)
+			return pk, nil
+		}
+
+		h.Log.Info("Consumer processed message", "ClientID", cl.ID, "Offset", offset)
+		h.Broker.Storage.MarkAsDelivered(cl.ID, offset)
 	}
 
 	return pk, nil

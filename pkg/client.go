@@ -14,7 +14,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 )
 
-type MessageHandler func(topic string, payload []byte)
+type MessageHandler func(topic string, payload []byte) error
 
 type Client struct {
 	addr     string
@@ -67,7 +67,7 @@ func (c *Client) Connect() error {
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Connect,
 		},
-		ProtocolVersion: 4,
+		ProtocolVersion: 5,
 		Connect: packets.ConnectParams{
 			ProtocolName:     []byte{0x4d, 0x51, 0x54, 0x54},
 			ClientIdentifier: c.clientID,
@@ -110,13 +110,15 @@ func (c *Client) Publish(topic string, payload []byte) error {
 	}()
 
 	pk := &packets.Packet{
+		ProtocolVersion: 5,
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Publish,
 			Qos:  1,
 		},
-		TopicName: topic,
-		Payload:   payload,
-		PacketID:  packetID,
+		TopicName:  topic,
+		Payload:    payload,
+		PacketID:   packetID,
+		Properties: packets.Properties{},
 	}
 
 	if err := c.writePacket(pk); err != nil {
@@ -133,16 +135,24 @@ func (c *Client) Publish(topic string, payload []byte) error {
 	}
 }
 
-func (c *Client) Subscribe(topic string, handler func(topic string, payload []byte)) error {
+func (c *Client) Subscribe(topic string, handler MessageHandler) error {
 	pk := &packets.Packet{
+		ProtocolVersion: 5,
 		FixedHeader: packets.FixedHeader{
 			Type: packets.Subscribe,
 			Qos:  1,
 		},
 		PacketID: c.nextPacketID(),
 		Filters: packets.Subscriptions{
-			{Filter: topic, Qos: 1},
+			{
+				Filter:            topic,
+				Qos:               1,
+				RetainHandling:    0,
+				NoLocal:           false,
+				RetainAsPublished: false,
+			},
 		},
+		ReasonCodes: []byte{0x00},
 	}
 
 	if err := c.writePacket(pk); err != nil {
@@ -206,21 +216,39 @@ func (c *Client) handleIncomingPublish(pk *packets.Packet) {
 	handler, ok := c.handlers[pk.TopicName]
 	c.mu.RUnlock()
 
-	if ok && handler != nil {
-		go handler(pk.TopicName, pk.Payload)
+	if !ok || handler == nil {
+		c.Log.Warn("No handler for topic", "topic", pk.TopicName)
+		return
 	}
-	if pk.FixedHeader.Qos > 0 {
-		ack := &packets.Packet{
-			FixedHeader: packets.FixedHeader{
-				Type: packets.Puback,
-			},
-			PacketID: pk.PacketID,
-		}
 
-		if err := c.writePacket(ack); err != nil {
-			c.Log.Error("Failed to send PUBACK", "error", err)
+	go func() {
+		reasonCode := byte(0x00)
+		// c.Log.Debug("Before processing msg", "packetID", pk.PacketID, "topic", pk.TopicName, "payload", string(pk.Payload), "reasonCode", reasonCode)
+		err := handler(pk.TopicName, pk.Payload)
+
+		if err != nil {
+			c.Log.Error("Handler failed", "error", err)
+			reasonCode = 0x83
 		}
-	}
+		c.Log.Debug("After processing msg", "packetID", pk.PacketID, "topic", pk.TopicName, "payload", string(pk.Payload), "reasonCode", reasonCode)
+		if pk.FixedHeader.Qos > 0 {
+			ack := &packets.Packet{
+				FixedHeader: packets.FixedHeader{
+					Type: packets.Puback,
+				},
+				PacketID:   pk.PacketID,
+				ReasonCode: reasonCode,
+			}
+
+			// if reasonCode != 0x00 && err != nil {
+			// 	ack.Properties.User = []packets.UserProperty{
+			// 		{Key: "error_detail", Val: err.Error()},
+			// 	}
+			// }
+
+			c.writePacket(ack)
+		}
+	}()
 }
 
 func (c *Client) Disconnect() {

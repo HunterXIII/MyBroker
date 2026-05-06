@@ -13,6 +13,8 @@ func (c *Client) writePacket(pk *packets.Packet) error {
 	body := new(bytes.Buffer)
 	var err error
 
+	pk.ProtocolVersion = 5
+
 	switch pk.FixedHeader.Type {
 	case packets.Connect:
 		err = pk.ConnectEncode(body)
@@ -43,6 +45,7 @@ func (c *Client) readPacket() (*packets.Packet, error) {
 	}
 
 	pk := &packets.Packet{}
+	pk.ProtocolVersion = 5
 	pk.FixedHeader.Decode(headerByte)
 
 	remLen, _, err := packets.DecodeLength(reader)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -24,8 +25,15 @@ func main() {
 	log.Info("Connected to broker")
 
 	topic := "test/topic"
-	err := cl.Subscribe(topic, func(t string, payload []byte) {
-		log.Info("Received message", "topic", t, "payload", string(payload))
+	err := cl.Subscribe(topic, func(t string, payload []byte) error {
+
+		// if string(payload) == "error" {
+		// 	return fmt.Errorf("simulated handler error")
+		// }
+
+		// log.Info("Received message", "topic", t, "payload", string(payload))
+		// return nil
+		return fmt.Errorf("ERRORF TEST MESSAGE")
 	})
 
 	if err != nil {

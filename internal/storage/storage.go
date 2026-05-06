@@ -13,16 +13,24 @@ import (
 	"github.com/HunterXIII/MyBroker/internal/models"
 )
 
+type MsgToDLQ struct {
+	Msg       models.Message `json:"msg"`
+	FailedBy  string         `json:"failed_by"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
 type StorageService struct {
 	msgFile    *os.File
 	msgLogPath string
 	subsPath   string
 	offsetPath string
+	dlqPath    string
 
 	mu            sync.RWMutex
 	currentOffset uint64
 	offsets       map[string]uint64
 	subscriptions map[string][]string
+	dlq           []MsgToDLQ
 
 	Log *slog.Logger
 }
@@ -37,8 +45,10 @@ func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error)
 		msgLogPath:    filepath.Join(dir, "messages.json"),
 		subsPath:      filepath.Join(dir, "subscriptions.json"),
 		offsetPath:    filepath.Join(dir, "offsets.json"),
+		dlqPath:       filepath.Join(dir, "dlq.json"),
 		offsets:       make(map[string]uint64),
 		subscriptions: make(map[string][]string),
+		dlq:           []MsgToDLQ{},
 	}
 
 	var err error
@@ -267,4 +277,58 @@ func (s *StorageService) MarkAsDelivered(clientID string, offset uint64) {
 			"ClientID", clientID,
 			"NewOffset", offset)
 	}
+}
+
+func (s *StorageService) MoveToDLQ(clientID string, offset uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	msg, err := s.getMessageByOffset(offset)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve message for DLQ: %w", err)
+	}
+
+	dlqEntry := MsgToDLQ{
+		Msg:       msg,
+		FailedBy:  clientID,
+		Timestamp: time.Now(),
+	}
+	s.dlq = append(s.dlq, dlqEntry)
+
+	data, err := json.MarshalIndent(s.dlq, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal DLQ: %w", err)
+	}
+
+	err = os.WriteFile(s.dlqPath, data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to save DLQ file: %w", err)
+	}
+
+	s.Log.Info("Message moved to DLQ", "ClientID", clientID, "Topic", msg.Topic, "Offset", msg.Offset)
+	return nil
+}
+
+func (s *StorageService) getMessageByOffset(offset uint64) (models.Message, error) {
+	file, err := os.Open(s.msgLogPath)
+	if err != nil {
+		return models.Message{}, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var msg models.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
+			if msg.Offset == offset {
+				return msg, nil
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return models.Message{}, fmt.Errorf("error scanning log file: %w", err)
+	}
+
+	return models.Message{}, fmt.Errorf("message with offset %d not found", offset)
 }

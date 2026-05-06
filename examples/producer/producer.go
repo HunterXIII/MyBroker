@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 
@@ -11,7 +10,7 @@ import (
 func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 
 	cl := pkg.NewClient("localhost:1883", "producer-1", log)
@@ -23,14 +22,20 @@ func main() {
 	defer cl.Disconnect()
 	log.Info("Connected to broker")
 
-	for i := 10; i < 100; i++ {
-		topic := "test/topic"
-		payload := []byte(fmt.Sprintf("Hello #%d", i))
-		if err := cl.Publish(topic, payload); err != nil {
-			log.Error("Failed to publish message", "err", err)
-		} else {
-			log.Info("Published message", "topic", topic, "payload", string(payload))
-		}
-	}
+	topic := "test/topic"
+	cl.Publish(topic, []byte("error msg"))
+	// for i := 0; i < 10; i++ {
+	// 	var payload []byte
+	// 	if i == 5 {
+	// 		payload = []byte("error")
+	// 	} else {
+	// 		payload = []byte(fmt.Sprintf("Hello #%d", i))
+	// 	}
+	// 	if err := cl.Publish(topic, payload); err != nil {
+	// 		log.Error("Failed to publish message", "err", err)
+	// 	} else {
+	// 		log.Info("Published message", "topic", topic, "payload", string(payload))
+	// 	}
+	// }
 
 }

@@ -137,7 +137,6 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 	}()
 }
 
-// TODD: Change Qos with 1 for at least once
 func (s *Subscriber) buildPacket(packetID uint16, msg *Message) packets.Packet {
 	return packets.Packet{
 		FixedHeader: packets.FixedHeader{
