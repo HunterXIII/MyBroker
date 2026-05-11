@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/HunterXIII/MyBroker/internal/broker"
 	"github.com/HunterXIII/MyBroker/internal/delivery"
@@ -26,7 +27,7 @@ func main() {
 	}()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 
 	slog.SetDefault(logger)
@@ -41,10 +42,12 @@ func main() {
 	if err != nil {
 		logger.Error("Storage failed", "err", err)
 	}
-	deliverySvc := delivery.NewDeliveryEngine(logger)
+
+	deliverySvc := delivery.NewDeliveryEngine(logger, storageSvc)
 	brokerSvc := broker.NewBrokerService(server, storageSvc, deliverySvc, logger, &broker.BrokerConfig{
-		TTL:          120,
-		MaxQueueSize: 1024,
+		TTL:             180,
+		MaxQueueSize:    1024,
+		IntervalCleanup: 10 * time.Minute,
 	})
 
 	brokerHook := &hooks.BrokerHook{

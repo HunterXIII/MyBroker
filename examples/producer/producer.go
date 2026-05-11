@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -23,19 +24,15 @@ func main() {
 	log.Info("Connected to broker")
 
 	topic := "test/topic"
-	cl.Publish(topic, []byte("error msg"))
-	// for i := 0; i < 10; i++ {
-	// 	var payload []byte
-	// 	if i == 5 {
-	// 		payload = []byte("error")
-	// 	} else {
-	// 		payload = []byte(fmt.Sprintf("Hello #%d", i))
-	// 	}
-	// 	if err := cl.Publish(topic, payload); err != nil {
-	// 		log.Error("Failed to publish message", "err", err)
-	// 	} else {
-	// 		log.Info("Published message", "topic", topic, "payload", string(payload))
-	// 	}
-	// }
+	// cl.Publish(topic, []byte("error msg"))
+	for i := 0; i < 10; i++ {
+
+		payload := []byte(fmt.Sprintf("Hello #%d", i))
+		if err := cl.Publish(topic, payload); err != nil {
+			log.Error("Failed to publish message", "err", err)
+		} else {
+			log.Info("Published message", "topic", topic, "payload", string(payload))
+		}
+	}
 
 }

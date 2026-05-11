@@ -15,9 +15,9 @@ type Message struct {
 	Topic     string
 	Payload   []byte
 	ExpiresAt time.Time
-	TTL       int64
-	Offset    uint64
-	PacketID  uint16
+	// TTL       int64
+	Offset   uint64
+	PacketID uint16
 }
 
 type Queue struct {

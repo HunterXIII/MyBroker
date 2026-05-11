@@ -13,8 +13,9 @@ import (
 )
 
 type BrokerConfig struct {
-	MaxQueueSize int
-	TTL          int64
+	MaxQueueSize    int
+	TTL             int64
+	IntervalCleanup time.Duration
 }
 
 type BrokerService struct {
@@ -50,6 +51,7 @@ func (b *BrokerService) Start() error {
 	b.ctxCancel = cancel
 
 	b.Delivery.Run(ctx)
+	b.Storage.StartGC(b.Context, b.Config.IntervalCleanup)
 
 	b.Log.Info("MQTT Server is listening on :1883")
 	return b.Server.Serve()
@@ -173,7 +175,7 @@ func (b *BrokerService) NewMessage(topicName string, payload []byte) error {
 		Topic:     topicName,
 		Payload:   payload,
 		ExpiresAt: time.Now().Add(time.Duration(b.Config.TTL) * time.Second),
-		TTL:       b.Config.TTL,
+		// TTL:       b.Config.TTL,
 	}
 
 	var err error

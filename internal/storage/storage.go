@@ -2,11 +2,13 @@ package storage
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,6 +22,7 @@ type MsgToDLQ struct {
 }
 
 type StorageService struct {
+	dir        string
 	msgFile    *os.File
 	msgLogPath string
 	subsPath   string
@@ -41,6 +44,7 @@ func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error)
 	}
 
 	s := &StorageService{
+		dir:           dir,
 		Log:           logger,
 		msgLogPath:    filepath.Join(dir, "messages.json"),
 		subsPath:      filepath.Join(dir, "subscriptions.json"),
@@ -85,31 +89,42 @@ func (s *StorageService) loadState() error {
 	return nil
 }
 
+func (s *StorageService) saveGlobalCheckpoint() {
+	offset := s.currentOffset
+
+	checkpointPath := filepath.Join(s.dir, "global_checkpoint.txt")
+	_ = os.WriteFile(checkpointPath, []byte(strconv.FormatUint(offset, 10)), 0644)
+}
+
 func (s *StorageService) getLastOffsetFromLog() uint64 {
-	file, err := os.Open(s.msgLogPath)
-	if err != nil {
-		return 0
-	}
-	defer file.Close()
+	var maxOffset uint64
 
-	var lastOffset uint64
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		var msg models.Message
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
-			lastOffset = msg.Offset
+	checkpointPath := filepath.Join(s.dir, "global_checkpoint.txt")
+	if data, err := os.ReadFile(checkpointPath); err == nil {
+		if val, err := strconv.ParseUint(string(data), 10, 64); err == nil {
+			maxOffset = val
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		s.Log.Error("Error scanning log file", "err", err)
-		return 0
+	file, err := os.Open(s.msgLogPath)
+	if err == nil {
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			var msg models.Message
+			if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
+				if msg.Offset > maxOffset {
+					maxOffset = msg.Offset
+				}
+			}
+		}
 	}
+
+	s.currentOffset = maxOffset
 
 	go s.startCheckpointWorker()
 
-	return lastOffset
+	return maxOffset
 }
 
 func (s *StorageService) startCheckpointWorker() {
@@ -165,13 +180,36 @@ func (s *StorageService) GetMessagesSince(offset uint64) ([]models.Message, erro
 			}
 		}
 	}
+	s.Log.Debug("Get messages", "offset", offset, "count", len(result))
+	return result, nil
+}
 
+func (s *StorageService) getAllMessages() ([]models.Message, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	file, err := os.Open(s.msgLogPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var result []models.Message
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		var msg models.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err == nil {
+			result = append(result, msg)
+		}
+	}
+	s.Log.Debug("Get all messages", "count", len(result))
 	return result, nil
 }
 
 func (s *StorageService) SaveMessage(msg *models.Message) (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	s.currentOffset++
 	msg.Offset = s.currentOffset
@@ -195,6 +233,7 @@ func (s *StorageService) SaveMessage(msg *models.Message) (uint64, error) {
 
 	s.Log.Debug("Message saved", "offset", s.currentOffset, "topic", msg.Topic)
 
+	s.saveGlobalCheckpoint()
 	return s.currentOffset, nil
 }
 
@@ -258,11 +297,12 @@ func (s *StorageService) GetClientOffset(clientID string) uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if offset, ok := s.offsets[clientID]; ok {
-		return offset
+	clientOff, ok := s.offsets[clientID]
+	if !ok {
+		return s.currentOffset
 	}
 
-	return s.currentOffset
+	return clientOff
 }
 
 func (s *StorageService) MarkAsDelivered(clientID string, offset uint64) {
@@ -331,4 +371,98 @@ func (s *StorageService) getMessageByOffset(offset uint64) (models.Message, erro
 	}
 
 	return models.Message{}, fmt.Errorf("message with offset %d not found", offset)
+}
+
+func (s *StorageService) сleanExpiredMessages() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.Log.Info("GC: Cleanup started")
+
+	now := time.Now()
+	expiredCount := 0
+	validCount := 0
+
+	messages, err := s.getAllMessages()
+	if err != nil {
+		return fmt.Errorf("failed to get all messages: %w", err)
+	}
+
+	tempFileName := filepath.Join(s.dir, "messages.json.tmp")
+	tempFile, err := os.OpenFile(tempFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	for _, msg := range messages {
+		if msg.ExpiresAt.After(now) {
+			data, err := json.Marshal(msg)
+			if err != nil {
+				tempFile.Close()
+				return fmt.Errorf("failed to marshal message during cleanup: %w", err)
+			}
+
+			if _, err := tempFile.Write(data); err != nil {
+				tempFile.Close()
+				return fmt.Errorf("failed to write to temp file: %w", err)
+			}
+			if _, err := tempFile.WriteString("\n"); err != nil {
+				tempFile.Close()
+				return fmt.Errorf("failed to write newline to temp file: %w", err)
+			}
+			validCount++
+		} else {
+			expiredCount++
+		}
+	}
+
+	tempFile.Sync()
+	tempFile.Close()
+
+	if expiredCount == 0 {
+		s.Log.Info("GC: No expired messages found, cleaning up temp file")
+		os.Remove(tempFileName)
+		return nil
+	}
+
+	if err := s.msgFile.Close(); err != nil {
+		return fmt.Errorf("failed to close current msgFile: %w", err)
+	}
+
+	s.Log.Debug("GC: Debug paths", "temp", tempFileName, "target", s.msgLogPath)
+
+	if err := os.Rename(tempFileName, s.msgLogPath); err != nil {
+		s.msgFile, _ = os.OpenFile(s.msgLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	newFile, err := os.OpenFile(s.msgLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to reopen messages file: %w", err)
+	}
+	s.msgFile = newFile
+
+	s.Log.Info("GC: Cleanup finished", "removed", expiredCount, "remaining", validCount)
+	s.saveGlobalCheckpoint()
+	return nil
+}
+
+func (s *StorageService) StartGC(ctx context.Context, interval time.Duration) {
+	s.Log.Info("GC: Background worker started", "interval", interval)
+
+	ticker := time.NewTicker(interval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := s.сleanExpiredMessages(); err != nil {
+					s.Log.Error("GC: Cleanup failed", "error", err)
+				}
+			case <-ctx.Done():
+				s.Log.Info("GC: Background worker stopped")
+				return
+			}
+		}
+	}()
 }

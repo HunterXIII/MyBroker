@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,7 +14,7 @@ func main() {
 		Level: slog.LevelDebug,
 	}))
 
-	cl := pkg.NewClient("localhost:1883", "consumer-1", log)
+	cl := pkg.NewClient("localhost:1883", "consumer-2", log)
 
 	if err := cl.Connect(); err != nil {
 		log.Error("Failed to connect to broker", "err", err)
@@ -31,9 +30,9 @@ func main() {
 		// 	return fmt.Errorf("simulated handler error")
 		// }
 
-		// log.Info("Received message", "topic", t, "payload", string(payload))
+		log.Info("Received message", "topic", t, "payload", string(payload))
 		// return nil
-		return fmt.Errorf("ERRORF TEST MESSAGE")
+		return nil
 	})
 
 	if err != nil {
