@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/HunterXIII/MyBroker/internal/metrics"
 	"github.com/HunterXIII/MyBroker/internal/models"
 	"github.com/HunterXIII/MyBroker/internal/storage"
 )
@@ -30,6 +31,18 @@ func NewDeliveryEngine(logger *slog.Logger, storage *storage.StorageService) *De
 
 func (d *DeliveryEngine) Run(ctx context.Context) {
 	d.Log.Info("Delivery Engine started")
+
+	go func() {
+		ticker := time.NewTicker(time.Second * 5)
+		for {
+			select {
+			case <-ticker.C:
+				metrics.DeliveryQueueLength.Set(float64(len(d.Tasks)))
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	go func() {
 		for {
@@ -59,25 +72,13 @@ func (d *DeliveryEngine) Run(ctx context.Context) {
 
 func (d *DeliveryEngine) dispatch(task *DeliveryTask) {
 	for _, sub := range task.Subs {
-		// packetID := sub.NextPacketID()
-
-		// sub.InFlightMu.Lock()
-		// sub.InFlight[packetID] = task.Msg.Offset
-		// sub.InFlightMu.Unlock()
-		// d.Log.Debug("created InFlight msg", "offset", task.Msg.Offset)
-
 		msgToSend := *task.Msg
-		// msgToSend.PacketID = packetID
 
 		select {
 		case sub.Messages <- &msgToSend:
-			d.Log.Debug("Message dispatched to subscriber",
-				"SubID", sub.ID,
-				"Offset", task.Msg.Offset)
-		default:
-			d.Log.Warn("Subscriber buffer full, message dropped from memory",
-				"SubID", sub.ID,
-				"Offset", task.Msg.Offset)
+			d.Log.Debug("Message dispatched", "SubID", sub.ID, "Offset", task.Msg.Offset)
+		case <-time.After(2 * time.Second):
+			d.Log.Error("Delivery timeout - client too slow", "SubID", sub.ID)
 		}
 	}
 }

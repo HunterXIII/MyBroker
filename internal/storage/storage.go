@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"sort"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/HunterXIII/MyBroker/internal/metrics"
 	"github.com/HunterXIII/MyBroker/internal/models"
 )
 
@@ -31,6 +34,7 @@ type StorageService struct {
 
 	mu            sync.RWMutex
 	currentOffset uint64
+	topicOffsets  map[string][]uint64
 	offsets       map[string]uint64
 	subscriptions map[string][]string
 	dlq           []MsgToDLQ
@@ -50,6 +54,7 @@ func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error)
 		subsPath:      filepath.Join(dir, "subscriptions.json"),
 		offsetPath:    filepath.Join(dir, "offsets.json"),
 		dlqPath:       filepath.Join(dir, "dlq.json"),
+		topicOffsets:  make(map[string][]uint64),
 		offsets:       make(map[string]uint64),
 		subscriptions: make(map[string][]string),
 		dlq:           []MsgToDLQ{},
@@ -68,6 +73,27 @@ func NewStorageService(logger *slog.Logger, dir string) (*StorageService, error)
 	return s, nil
 }
 
+// func (s *StorageService) loadState() error {
+// 	s.mu.Lock()
+// 	defer s.mu.Unlock()
+
+// 	if data, err := os.ReadFile(s.subsPath); err == nil {
+// 		json.Unmarshal(data, &s.subscriptions)
+// 	}
+
+// 	if data, err := os.ReadFile(s.offsetPath); err == nil {
+// 		json.Unmarshal(data, &s.offsets)
+// 	}
+
+// 	s.currentOffset = s.getLastOffsetFromLog()
+
+// 	s.Log.Info("Storage state loaded",
+// 		"last_offset", s.currentOffset,
+// 		"active_sessions", len(s.offsets))
+
+// 	return nil
+// }
+
 func (s *StorageService) loadState() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,11 +106,33 @@ func (s *StorageService) loadState() error {
 		json.Unmarshal(data, &s.offsets)
 	}
 
-	s.currentOffset = s.getLastOffsetFromLog()
+	messages, err := s.getAllMessages()
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.Log.Info("No message log found, starting with empty index")
+			return nil
+		}
+		return fmt.Errorf("failed to read messages for indexing: %w", err)
+	}
+
+	s.topicOffsets = make(map[string][]uint64)
+	maxOffset := uint64(0)
+
+	for _, msg := range messages {
+		s.topicOffsets[msg.Topic] = append(s.topicOffsets[msg.Topic], msg.Offset)
+
+		if msg.Offset > maxOffset {
+			maxOffset = msg.Offset
+		}
+	}
+
+	s.currentOffset = maxOffset
 
 	s.Log.Info("Storage state loaded",
 		"last_offset", s.currentOffset,
-		"active_sessions", len(s.offsets))
+		"active_sessions", len(s.offsets),
+		"indexed_topics", len(s.topicOffsets),
+		"total_messages_indexed", len(messages))
 
 	return nil
 }
@@ -181,12 +229,15 @@ func (s *StorageService) GetMessagesSince(offset uint64) ([]models.Message, erro
 		}
 	}
 	s.Log.Debug("Get messages", "offset", offset, "count", len(result))
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Offset < result[j].Offset
+	})
 	return result, nil
 }
 
 func (s *StorageService) getAllMessages() ([]models.Message, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// s.mu.RLock()
+	// defer s.mu.RUnlock()
 
 	file, err := os.Open(s.msgLogPath)
 	if err != nil {
@@ -208,8 +259,8 @@ func (s *StorageService) getAllMessages() ([]models.Message, error) {
 }
 
 func (s *StorageService) SaveMessage(msg *models.Message) (uint64, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.currentOffset++
 	msg.Offset = s.currentOffset
@@ -234,6 +285,7 @@ func (s *StorageService) SaveMessage(msg *models.Message) (uint64, error) {
 	s.Log.Debug("Message saved", "offset", s.currentOffset, "topic", msg.Topic)
 
 	s.saveGlobalCheckpoint()
+	s.topicOffsets[msg.Topic] = append(s.topicOffsets[msg.Topic], msg.Offset)
 	return s.currentOffset, nil
 }
 
@@ -346,6 +398,7 @@ func (s *StorageService) MoveToDLQ(clientID string, offset uint64) error {
 	}
 
 	s.Log.Info("Message moved to DLQ", "ClientID", clientID, "Topic", msg.Topic, "Offset", msg.Offset)
+	metrics.MsgInDLQ.Inc()
 	return nil
 }
 
@@ -374,8 +427,8 @@ func (s *StorageService) getMessageByOffset(offset uint64) (models.Message, erro
 }
 
 func (s *StorageService) сleanExpiredMessages() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.Log.Info("GC: Cleanup started")
 
@@ -394,6 +447,8 @@ func (s *StorageService) сleanExpiredMessages() error {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
+	newTopicOffsets := make(map[string][]uint64)
+
 	for _, msg := range messages {
 		if msg.ExpiresAt.After(now) {
 			data, err := json.Marshal(msg)
@@ -410,6 +465,7 @@ func (s *StorageService) сleanExpiredMessages() error {
 				tempFile.Close()
 				return fmt.Errorf("failed to write newline to temp file: %w", err)
 			}
+			newTopicOffsets[msg.Topic] = append(newTopicOffsets[msg.Topic], msg.Offset)
 			validCount++
 		} else {
 			expiredCount++
@@ -424,6 +480,8 @@ func (s *StorageService) сleanExpiredMessages() error {
 		os.Remove(tempFileName)
 		return nil
 	}
+
+	s.topicOffsets = newTopicOffsets
 
 	if err := s.msgFile.Close(); err != nil {
 		return fmt.Errorf("failed to close current msgFile: %w", err)
@@ -465,4 +523,32 @@ func (s *StorageService) StartGC(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}()
+}
+
+func (s *StorageService) GetConsumerLag(clientID string) uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	lastConfirmed, ok := s.offsets[clientID]
+	if !ok {
+		lastConfirmed = 0
+	}
+
+	clientTopics := s.subscriptions[clientID]
+	var totalLag uint64
+
+	for _, topic := range clientTopics {
+		offsets, exists := s.topicOffsets[topic]
+		if !exists {
+			continue
+		}
+
+		idx := sort.Search(len(offsets), func(i int) bool {
+			return offsets[i] > lastConfirmed
+		})
+
+		totalLag += uint64(len(offsets) - idx)
+	}
+
+	return totalLag
 }

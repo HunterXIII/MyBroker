@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/HunterXIII/MyBroker/internal/models"
 	"github.com/HunterXIII/MyBroker/internal/storage"
 	mqtt "github.com/mochi-mqtt/server/v2"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type BrokerConfig struct {
@@ -52,7 +54,7 @@ func (b *BrokerService) Start() error {
 
 	b.Delivery.Run(ctx)
 	b.Storage.StartGC(b.Context, b.Config.IntervalCleanup)
-
+	b.StartMetrics("2112")
 	b.Log.Info("MQTT Server is listening on :1883")
 	return b.Server.Serve()
 }
@@ -104,36 +106,25 @@ func (b *BrokerService) RemoveSubsciber(id string) error {
 
 func (b *BrokerService) Subscribe(id string, topicName string) error {
 	if err := b.Storage.SaveSubscription(id, topicName); err != nil {
-		b.Log.Error("Failed to save subscription to disk", "err", err)
 		return err
 	}
 
 	sub := b.GetSubscriber(id)
 	topic := b.GetOrCreateNewTopic(topicName)
-	topic.AddSubscriber(sub)
-
-	b.Log.Info("Client subscribed", "ClientID", id, "topic", topicName)
 
 	lastOffset := b.Storage.GetClientOffset(id)
-
 	missedMsgs, err := b.Storage.GetMessagesSince(lastOffset)
 	if err != nil {
-		b.Log.Error("Failed to recover missed messages", "err", err)
 		return err
 	}
 
-	if len(missedMsgs) > 0 {
-		b.Log.Info("Recovering history", "ClientID", id, "Count", len(missedMsgs))
-
-		for _, msg := range missedMsgs {
-			if msg.Topic == topicName {
-				b.Delivery.Tasks <- &delivery.DeliveryTask{
-					Msg:  &msg,
-					Subs: []*models.Subscriber{sub},
-				}
-			}
-		}
+	b.Log.Info("Recovering history", "ClientID", id, "Count", len(missedMsgs))
+	for i := range missedMsgs {
+		sub.Messages <- &missedMsgs[i]
+		b.Log.Debug("Recovered message", "ClientID", id, "Topic", missedMsgs[i].Topic, "Offset", missedMsgs[i].Offset)
 	}
+
+	topic.AddSubscriber(sub)
 
 	return nil
 }
@@ -196,6 +187,16 @@ func (b *BrokerService) NewMessage(topicName string, payload []byte) error {
 
 	b.Log.Debug("Message logged and task created", "Offset", msg.Offset, "Topic", msg.Topic)
 	return nil
+}
+
+func (b *BrokerService) StartMetrics(port string) {
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		b.Log.Info("Metrics server started", "port", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			b.Log.Error("Failed to start metrics server", "error", err)
+		}
+	}()
 }
 
 func (b *BrokerService) Stop() {

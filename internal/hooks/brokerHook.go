@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/HunterXIII/MyBroker/internal/broker"
+	"github.com/HunterXIII/MyBroker/internal/metrics"
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
@@ -31,7 +32,7 @@ func (h *BrokerHook) OnConnect(cl *mqtt.Client, pk packets.Packet) error {
 
 	h.Log.Info("[CONNECT]", "ClientID", cl.ID)
 	h.Broker.AddSubscriber(cl)
-
+	metrics.ActiveSubscribers.Inc()
 	return nil
 }
 
@@ -65,6 +66,7 @@ func (h *BrokerHook) OnUnsubscribe(cl *mqtt.Client, pk packets.Packet) packets.P
 func (h *BrokerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	h.Log.Info("[DISCONNECT]", "ClientID", cl.ID, "err", err, "expire", expire)
 	h.Broker.RemoveSubsciber(cl.ID)
+	metrics.ActiveSubscribers.Dec()
 }
 
 func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.Packet, error) {
@@ -76,6 +78,7 @@ func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.P
 		if err != nil {
 			h.Log.Error("Don't push new message", "err", err)
 		}
+		metrics.MessagesPublishedTotal.WithLabelValues(pk.TopicName).Inc()
 	case packets.Puback:
 		h.Log.Info("[PUBACK]", "ClientID", cl.ID, "PacketID", pk.PacketID, "ReasonCode", pk.ReasonCode)
 
@@ -90,7 +93,6 @@ func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.P
 			delete(sub.InFlight, pk.PacketID)
 		}
 		sub.InFlightMu.Unlock()
-
 		if !exists {
 			return pk, nil
 		}
@@ -110,7 +112,12 @@ func (h *BrokerHook) OnPacketRead(cl *mqtt.Client, pk packets.Packet) (packets.P
 		}
 
 		h.Log.Info("Consumer processed message", "ClientID", cl.ID, "Offset", offset)
+
 		h.Broker.Storage.MarkAsDelivered(cl.ID, offset)
+		metrics.MessagesDeliveredTotal.WithLabelValues(cl.ID).Inc()
+
+		lag := h.Broker.Storage.GetConsumerLag(cl.ID)
+		metrics.ConsumerLag.WithLabelValues(cl.ID).Set(float64(lag))
 	}
 
 	return pk, nil

@@ -105,6 +105,11 @@ func (s *Subscriber) NextPacketID() uint16 {
 
 func (s *Subscriber) StartWorker(ctx context.Context) {
 	s.Log.Info("Start Sub's worker")
+
+	s.Messages = make(chan *Message, 128)
+	s.Done = make(chan struct{}, 1)
+	s.InFlight = make(map[uint16]uint64)
+
 	go func() {
 		defer func() {
 			// TODO
@@ -114,6 +119,7 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 		for {
 			select {
 			case msg, ok := <-s.Messages:
+				s.Log.Debug("[SUBSCRIBE's WORKER] New message", "ClientID", s.ID, "Topic", msg.Topic, "Payload", string(msg.Payload), "Offset", msg.Offset)
 				if !ok {
 					return
 				}
@@ -124,10 +130,10 @@ func (s *Subscriber) StartWorker(ctx context.Context) {
 				s.InFlightMu.Unlock()
 
 				pk := s.buildPacket(packetID, msg)
-
+				time.Sleep(1 * time.Millisecond)
 				err := s.Client.WritePacket(pk)
 				if err != nil {
-					s.Log.Error("Failed to send message", "ClientID", s.ID, "err", err)
+					s.Log.Error("[SUBSCRIBE's WORKER] Failed to send message", "ClientID", s.ID, "err", err)
 					return
 				}
 			case <-ctx.Done():

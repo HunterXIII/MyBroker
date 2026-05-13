@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/HunterXIII/MyBroker/pkg"
 )
@@ -24,14 +28,27 @@ func main() {
 	log.Info("Connected to broker")
 
 	topic := "test/topic"
-	// cl.Publish(topic, []byte("error msg"))
-	for i := 0; i < 10; i++ {
 
-		payload := []byte(fmt.Sprintf("Hello #%d", i))
-		if err := cl.Publish(topic, payload); err != nil {
-			log.Error("Failed to publish message", "err", err)
-		} else {
-			log.Info("Published message", "topic", topic, "payload", string(payload))
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	i := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			payload := []byte(fmt.Sprintf("Hello, world! #%d", i))
+			if err := cl.Publish(topic, payload); err != nil {
+				log.Error("Failed to publish message", "err", err)
+			} else {
+				log.Info("Published message", "topic", topic, "payload", string(payload))
+			}
+			i++
 		}
 	}
 

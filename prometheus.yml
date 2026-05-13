@@ -1,0 +1,4 @@
+scrape_configs:
+  - job_name: 'my_broker'
+    static_configs:
+      - targets: ['broker:2112'] # Порт, на котором ты запустил StartMetrics

@@ -221,34 +221,26 @@ func (c *Client) handleIncomingPublish(pk *packets.Packet) {
 		return
 	}
 
-	go func() {
-		reasonCode := byte(0x00)
-		// c.Log.Debug("Before processing msg", "packetID", pk.PacketID, "topic", pk.TopicName, "payload", string(pk.Payload), "reasonCode", reasonCode)
-		err := handler(pk.TopicName, pk.Payload)
+	reasonCode := byte(0x00)
+	err := handler(pk.TopicName, pk.Payload)
 
-		if err != nil {
-			c.Log.Error("Handler failed", "error", err)
-			reasonCode = 0x83
+	if err != nil {
+		c.Log.Error("Handler failed", "error", err)
+		reasonCode = 0x83
+	}
+	c.Log.Debug("After processing msg", "packetID", pk.PacketID, "topic", pk.TopicName, "payload", string(pk.Payload), "reasonCode", reasonCode)
+	if pk.FixedHeader.Qos > 0 {
+		ack := &packets.Packet{
+			FixedHeader: packets.FixedHeader{
+				Type: packets.Puback,
+			},
+			PacketID:   pk.PacketID,
+			ReasonCode: reasonCode,
 		}
-		c.Log.Debug("After processing msg", "packetID", pk.PacketID, "topic", pk.TopicName, "payload", string(pk.Payload), "reasonCode", reasonCode)
-		if pk.FixedHeader.Qos > 0 {
-			ack := &packets.Packet{
-				FixedHeader: packets.FixedHeader{
-					Type: packets.Puback,
-				},
-				PacketID:   pk.PacketID,
-				ReasonCode: reasonCode,
-			}
 
-			// if reasonCode != 0x00 && err != nil {
-			// 	ack.Properties.User = []packets.UserProperty{
-			// 		{Key: "error_detail", Val: err.Error()},
-			// 	}
-			// }
+		c.writePacket(ack)
+	}
 
-			c.writePacket(ack)
-		}
-	}()
 }
 
 func (c *Client) Disconnect() {

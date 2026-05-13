@@ -11,10 +11,10 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 
-	cl := pkg.NewClient("localhost:1883", "consumer-2", log)
+	cl := pkg.NewClient("localhost:1883", "consumer-1", log)
 
 	if err := cl.Connect(); err != nil {
 		log.Error("Failed to connect to broker", "err", err)
