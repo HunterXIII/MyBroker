@@ -33,16 +33,18 @@ var (
 		[]string{"client_id"},
 	)
 
+	TopicSubscribers = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "broker_topic_subscribers_count",
+			Help: "Текущее количество активных подписчиков в разрезе топиков",
+		},
+		[]string{"topic"},
+	)
+
 	// Текущее количество активных подписчиков
 	ActiveSubscribers = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "broker_active_subscribers",
 		Help: "The current number of active subscribers",
-	})
-
-	// Размер очереди в DeliveryEngine
-	DeliveryQueueLength = promauto.NewGauge(prometheus.GaugeOpts{
-		Name: "broker_delivery_queue_length",
-		Help: "Current number of tasks in delivery channel",
 	})
 
 	// Ошибки доставки

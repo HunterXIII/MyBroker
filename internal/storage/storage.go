@@ -552,3 +552,15 @@ func (s *StorageService) GetConsumerLag(clientID string) uint64 {
 
 	return totalLag
 }
+
+func (s *StorageService) GetTopicsByClient(clientID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if topics, ok := s.subscriptions[clientID]; ok {
+		cp := make([]string, len(topics))
+		copy(cp, topics)
+		return cp
+	}
+	return nil
+}

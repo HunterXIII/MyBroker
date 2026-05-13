@@ -44,6 +44,7 @@ func (h *BrokerHook) OnSubscribe(cl *mqtt.Client, pk packets.Packet) packets.Pac
 		topics = append(topics, filter.Filter)
 		h.Log.Info("[SUBSCRIBE]", "ClientID", cl.ID, "Topic", filter.Filter)
 		h.Broker.Subscribe(cl.ID, filter.Filter)
+		metrics.TopicSubscribers.WithLabelValues(filter.Filter).Inc()
 	}
 
 	pk.Filters = []packets.Subscription{}
@@ -59,12 +60,18 @@ func (h *BrokerHook) OnUnsubscribe(cl *mqtt.Client, pk packets.Packet) packets.P
 		topics = append(topics, filter.Filter)
 		h.Log.Info("[UNSUBSCRIBE]", "ClientID", cl.ID, "Topic", filter.Filter)
 		h.Broker.Unsubscribe(cl.ID, filter.Filter)
+		metrics.TopicSubscribers.WithLabelValues(filter.Filter).Dec()
 	}
 
 	return pk
 }
 func (h *BrokerHook) OnDisconnect(cl *mqtt.Client, err error, expire bool) {
 	h.Log.Info("[DISCONNECT]", "ClientID", cl.ID, "err", err, "expire", expire)
+	topics := h.Broker.Storage.GetTopicsByClient(cl.ID)
+	for _, topic := range topics {
+		h.Broker.Unsubscribe(cl.ID, topic)
+		metrics.TopicSubscribers.WithLabelValues(topic).Dec()
+	}
 	h.Broker.RemoveSubsciber(cl.ID)
 	metrics.ActiveSubscribers.Dec()
 }

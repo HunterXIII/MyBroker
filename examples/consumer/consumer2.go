@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,7 +11,7 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 
 	cl := pkg.NewClient("localhost:1883", "consumer-2", log)
@@ -24,7 +23,7 @@ func main() {
 	defer cl.Disconnect()
 	log.Info("Connected to broker")
 
-	topic := "test/topic"
+	topic := "test/topic2"
 	err := cl.Subscribe(topic, func(t string, payload []byte) error {
 
 		// if string(payload) == "error" {
@@ -32,8 +31,8 @@ func main() {
 		// }
 
 		log.Info("Received message", "topic", t, "payload", string(payload))
-		// return nil
-		return fmt.Errorf("Test Error")
+		return nil
+		// return fmt.Errorf("Test Error")
 	})
 
 	if err != nil {

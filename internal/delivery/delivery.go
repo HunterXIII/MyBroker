@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/HunterXIII/MyBroker/internal/metrics"
 	"github.com/HunterXIII/MyBroker/internal/models"
 	"github.com/HunterXIII/MyBroker/internal/storage"
 )
@@ -37,7 +36,7 @@ func (d *DeliveryEngine) Run(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				metrics.DeliveryQueueLength.Set(float64(len(d.Tasks)))
+
 			case <-ctx.Done():
 				return
 			}
