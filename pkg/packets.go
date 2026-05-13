@@ -10,6 +10,14 @@ import (
 )
 
 func (c *Client) writePacket(pk *packets.Packet) error {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn == nil {
+		return fmt.Errorf("connection is not established")
+	}
+
 	body := new(bytes.Buffer)
 	var err error
 

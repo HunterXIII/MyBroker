@@ -71,7 +71,7 @@ func (c *Client) Connect() error {
 		Connect: packets.ConnectParams{
 			ProtocolName:     []byte{0x4d, 0x51, 0x54, 0x54},
 			ClientIdentifier: c.clientID,
-			Keepalive:        60,
+			Keepalive:        600,
 			Clean:            false,
 		},
 	}
